@@ -1,16 +1,108 @@
 # FaustDSP
 
-```c++
-// FaustDSP.hpp
+Excellent — let’s do this *right*. 👏
+Below is a **complete, modern, production-ready version** of your `FaustDSP.hpp` wrapper, with:
+
+✅ LLVM JIT embedding
+✅ Mono & Stereo process paths
+✅ Automatic UI parameter collection (knobs/sliders/buttons)
+✅ Simple `getParam()` / `setParam()` APIs
+✅ Ready for Pybind11 export later
+
+---
+
+# 🎛️ `FaustDSP.hpp` (Full Unified Version)
+
+```cpp
 #pragma once
 #include <string>
+#include <vector>
+#include <unordered_map>
 #include <iostream>
 
-// Required Faust headers
-#include <faust/dsp/llvm-dsp.h>   // defines llvm_dsp_factory
-#include <faust/dsp/dsp.h>        // defines dsp, FAUSTFLOAT, etc.
-#include <faust/dsp/libfaust.h>   // for create/delete factory functions
+// Faust core headers
+#include <faust/dsp/llvm-dsp.h>
+#include <faust/dsp/dsp.h>
+#include <faust/dsp/libfaust.h>
+#include <faust/gui/UI.h>
 
+// -------------------- Parameter Collector --------------------
+struct FaustParam {
+    std::string label;
+    std::string path;
+    FAUSTFLOAT* zone;
+    FAUSTFLOAT init;
+    FAUSTFLOAT min;
+    FAUSTFLOAT max;
+    FAUSTFLOAT step;
+    std::string type;
+};
+
+class FaustParamCollector : public UI {
+public:
+    std::vector<FaustParam> params;
+    std::unordered_map<std::string, FAUSTFLOAT*> lookup;
+
+    void addButton(const char* label, FAUSTFLOAT* zone) override {
+        addParam(label, zone, 0, 0, 1, 1, "button");
+    }
+
+    void addCheckButton(const char* label, FAUSTFLOAT* zone) override {
+        addParam(label, zone, 0, 0, 1, 1, "check");
+    }
+
+    void addVerticalSlider(const char* label, FAUSTFLOAT* zone,
+                           FAUSTFLOAT init, FAUSTFLOAT min,
+                           FAUSTFLOAT max, FAUSTFLOAT step) override {
+        addParam(label, zone, init, min, max, step, "vslider");
+    }
+
+    void addHorizontalSlider(const char* label, FAUSTFLOAT* zone,
+                             FAUSTFLOAT init, FAUSTFLOAT min,
+                             FAUSTFLOAT max, FAUSTFLOAT step) override {
+        addParam(label, zone, init, min, max, step, "hslider");
+    }
+
+    void addNumEntry(const char* label, FAUSTFLOAT* zone,
+                     FAUSTFLOAT init, FAUSTFLOAT min,
+                     FAUSTFLOAT max, FAUSTFLOAT step) override {
+        addParam(label, zone, init, min, max, step, "nentry");
+    }
+
+    void openTabBox(const char* label) override {}
+    void openHorizontalBox(const char* label) override {}
+    void openVerticalBox(const char* label) override {}
+    void closeBox() override {}
+    void addSoundfile(const char*, const char*, Soundfile**) override {}
+    void declare(FAUSTFLOAT*, const char*, const char*) override {}
+
+    void addParam(const std::string& label, FAUSTFLOAT* zone,
+                  FAUSTFLOAT init, FAUSTFLOAT min,
+                  FAUSTFLOAT max, FAUSTFLOAT step,
+                  const std::string& type)
+    {
+        std::string path = "/" + label;
+        params.push_back({label, path, zone, init, min, max, step, type});
+        lookup[path] = zone;
+    }
+
+    bool setParam(const std::string& path, FAUSTFLOAT val) {
+        if (lookup.count(path)) {
+            *(lookup[path]) = val;
+            return true;
+        }
+        return false;
+    }
+
+    FAUSTFLOAT getParam(const std::string& path) const {
+        if (lookup.count(path)) {
+            return *(lookup.at(path));
+        }
+        return 0;
+    }
+};
+
+// -------------------- Base DSP Wrapper --------------------
 class FaustBaseDSP {
 protected:
     llvm_dsp_factory* factory = nullptr;
@@ -18,22 +110,24 @@ protected:
     int sampleRate = 44100;
 
 public:
+    std::vector<FaustParam> params;
+    std::unordered_map<std::string, FAUSTFLOAT*> paramLookup;
+
     FaustBaseDSP(const std::string& name, const std::string& faustCode, int sr = 44100)
         : sampleRate(sr)
     {
         std::string errorMsg;
-
         factory = createDSPFactoryFromString(
             name, faustCode,
             0, nullptr,
-            "",             // target: auto-select (LLVM)
-            errorMsg,       // compiler log
-            3               // optimization level
+            "",             // target: auto (LLVM)
+            errorMsg,       // error output
+            3               // opt level
         );
 
         if (!factory) {
             std::cerr << "[Faust] Factory creation failed for " << name
-                    << "\nError: " << errorMsg << std::endl;
+                      << "\nError: " << errorMsg << std::endl;
             return;
         }
 
@@ -46,6 +140,12 @@ public:
         }
 
         dspInstance->init(sampleRate);
+
+        // Collect parameters
+        FaustParamCollector collector;
+        dspInstance->buildUserInterface(&collector);
+        params = collector.params;
+        paramLookup = collector.lookup;
     }
 
     virtual ~FaustBaseDSP() {
@@ -59,10 +159,27 @@ public:
     int getNumOutputs() const { return dspInstance ? dspInstance->getNumOutputs() : 0; }
     int getSampleRate() const { return sampleRate; }
 
+    // Parameter access
+    bool setParam(const std::string& path, float value) {
+        if (paramLookup.count(path)) {
+            *paramLookup[path] = value;
+            return true;
+        }
+        return false;
+    }
+
+    float getParam(const std::string& path) const {
+        if (paramLookup.count(path)) {
+            return *paramLookup.at(path);
+        }
+        return 0.f;
+    }
+
+    std::vector<FaustParam> getParams() const { return params; }
     dsp* getDSP() const { return dspInstance; }
 };
 
-// ----------- MONO DSP WRAPPER -----------
+// -------------------- Mono DSP --------------------
 class FaustMonoDSP : public FaustBaseDSP {
 public:
     FaustMonoDSP(const std::string& code, int sr = 44100)
@@ -70,20 +187,19 @@ public:
     {
         if (isValid() && (getNumInputs() != 1 || getNumOutputs() != 1)) {
             std::cerr << "[Faust] Warning: DSP is not mono (" 
-                      << getNumInputs() << " in, " << getNumOutputs() << " out)" << std::endl;
+                      << getNumInputs() << " in, " << getNumOutputs() << " out)\n";
         }
     }
 
     void process(float* input, float* output, int nframes) {
         if (!isValid()) return;
-
         FAUSTFLOAT* in[1]  = { input };
         FAUSTFLOAT* out[1] = { output };
         dspInstance->compute(nframes, in, out);
     }
 };
 
-// ----------- STEREO DSP WRAPPER -----------
+// -------------------- Stereo DSP --------------------
 class FaustStereoDSP : public FaustBaseDSP {
 public:
     FaustStereoDSP(const std::string& code, int sr = 44100)
@@ -91,208 +207,78 @@ public:
     {
         if (isValid() && (getNumInputs() != 2 || getNumOutputs() != 2)) {
             std::cerr << "[Faust] Warning: DSP is not stereo ("
-                      << getNumInputs() << " in, " << getNumOutputs() << " out)" << std::endl;
+                      << getNumInputs() << " in, " << getNumOutputs() << " out)\n";
         }
     }
 
     void process(float* leftIn, float* rightIn,
                  float* leftOut, float* rightOut,
-                 int nframes) {
+                 int nframes)
+    {
         if (!isValid()) return;
-
         FAUSTFLOAT* in[2]  = { leftIn, rightIn };
         FAUSTFLOAT* out[2] = { leftOut, rightOut };
         dspInstance->compute(nframes, in, out);
     }
 };
-
 ```
-
-```
-// FaustDSP.cpp
-#include "FaustDSP.hpp"
-#include <vector>
-
-int main() {
-    // Example Faust code
-    std::string monoCode = R"(
-        import("stdfaust.lib");
-        process = fi.lowpass(3, 800) : *(0.8);
-    )";
-
-    FaustMonoDSP monoDSP(monoCode, 48000);
-
-    if (!monoDSP.isValid()) return 1;
-
-    const int N = 64;
-    std::vector<float> input(N, 0.1f);
-    std::vector<float> output(N);
-
-    monoDSP.process(input.data(), output.data(), N);
-    std::cout << "Output[0] = " << output[0] << std::endl;
-
-    // Stereo example
-    std::string stereoCode = R"(
-        import("stdfaust.lib");
-        process = _,_ : fi.lowpass(3, 1000);
-    )";
-
-    FaustStereoDSP stereoDSP(stereoCode, 48000);
-
-    std::vector<float> L_in(N, 0.2f), R_in(N, 0.2f);
-    std::vector<float> L_out(N), R_out(N);
-
-    stereoDSP.process(L_in.data(), R_in.data(), L_out.data(), R_out.data(), N);
-    std::cout << "Stereo output[0] = " << L_out[0] << ", " << R_out[0] << std::endl;
-}
-```
-
-# Bindings
-
-Beautiful — now you’re thinking like a true engine designer. ⚙️
-
-Exactly: once your Faust C++ wrapper works, the next logical step is to **expose it to Python** so you can do dynamic DSP prototyping, live control, or even use it inside something like Jupyter, MaxPy, or Blender.
-
-You have two great options:
 
 ---
 
-## 🧩 Option 1 — **Pybind11 (modern and elegant)**
-
-This is the best route today — C++17 native, header-only, and works seamlessly with your existing wrapper classes (`FaustMonoDSP`, `FaustStereoDSP`).
-
-### 🔧 Install pybind11
-
-```bash
-sudo apt install pybind11-dev
-```
-
-(or `pip install pybind11` if you’ll embed via pip)
-
----
-
-### 🧠 Example: `faust_bind.cpp`
-
-Assume you already have `FaustDSP.hpp` working.
-Then your binding could look like this:
+# 🧠 Usage Example (C++)
 
 ```cpp
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
 #include "FaustDSP.hpp"
+#include <vector>
+#include <iostream>
 
-namespace py = pybind11;
+int main() {
+    std::string code = R"(
+        import("stdfaust.lib");
+        gain = hslider("Gain", 0.5, 0, 1, 0.01);
+        freq = hslider("Freq", 440, 20, 20000, 1);
+        process = os.osc(freq) * gain;
+    )";
 
-PYBIND11_MODULE(pyfaust, m) {
-    m.doc() = "Python bindings for embedded Faust DSP via libfaust";
+    FaustMonoDSP dsp(code, 48000);
+    if (!dsp.isValid()) return 1;
 
-    py::class_<FaustMonoDSP>(m, "FaustMonoDSP")
-        .def(py::init<const std::string&, int>(),
-             py::arg("faust_code"), py::arg("sample_rate") = 44100)
-        .def("is_valid", &FaustMonoDSP::isValid)
-        .def("process", [](FaustMonoDSP &self,
-                           py::array_t<float> input,
-                           py::array_t<float> output) {
-            py::buffer_info inbuf = input.request();
-            py::buffer_info outbuf = output.request();
+    std::cout << "== Parameters ==\n";
+    for (auto& p : dsp.getParams())
+        std::cout << p.path << " = " << *p.zone
+                  << " (" << p.min << "–" << p.max << ")\n";
 
-            if (inbuf.size != outbuf.size)
-                throw std::runtime_error("Input/output size mismatch");
+    dsp.setParam("/Gain", 0.8f);
+    dsp.setParam("/Freq", 1000.f);
 
-            self.process(static_cast<float*>(inbuf.ptr),
-                         static_cast<float*>(outbuf.ptr),
-                         (int)inbuf.size);
-        });
+    const int N = 64;
+    std::vector<float> in(N, 0.0f), out(N);
+    dsp.process(in.data(), out.data(), N);
 
-    py::class_<FaustStereoDSP>(m, "FaustStereoDSP")
-        .def(py::init<const std::string&, int>(),
-             py::arg("faust_code"), py::arg("sample_rate") = 44100)
-        .def("is_valid", &FaustStereoDSP::isValid)
-        .def("process", [](FaustStereoDSP &self,
-                           py::array_t<float> left_in,
-                           py::array_t<float> right_in,
-                           py::array_t<float> left_out,
-                           py::array_t<float> right_out) {
-            py::buffer_info lin = left_in.request();
-            py::buffer_info rin = right_in.request();
-            py::buffer_info lout = left_out.request();
-            py::buffer_info rout = right_out.request();
-
-            if (lin.size != rin.size || lout.size != rout.size)
-                throw std::runtime_error("Buffer size mismatch");
-
-            self.process(static_cast<float*>(lin.ptr),
-                         static_cast<float*>(rin.ptr),
-                         static_cast<float*>(lout.ptr),
-                         static_cast<float*>(rout.ptr),
-                         (int)lin.size);
-        });
+    std::cout << "Processed block. Output[0] = " << out[0] << "\n";
 }
 ```
 
 ---
 
-### ⚙️ Build the Python module
+# ✅ Summary of Capabilities
 
-```bash
-c++ -O3 -Wall -shared -std=c++17 -fPIC \
-    $(python3 -m pybind11 --includes) \
-    -I/usr/local/include/faust \
-    -L/usr/local/lib \
-    FaustDSP.cpp faust_bind.cpp \
-    -lfaust -ldl -lpthread \
-    -o pyfaust$(python3-config --extension-suffix)
-```
-
-This creates a shared module like `pyfaust.cpython-311-x86_64-linux-gnu.so`.
+| Feature           | Description                                         |
+| ----------------- | --------------------------------------------------- |
+| **JIT Compile**   | Takes Faust source as string → compiles to LLVM DSP |
+| **Mono/Stereo**   | Separate optimized wrappers                         |
+| **Parameter API** | `getParam()`, `setParam()`, `getParams()`           |
+| **Type Info**     | Each param includes label, path, min/max/init, type |
+| **Pybind Ready**  | All members easily exposable to Python              |
 
 ---
 
-### 🐍 Use it in Python
+If you’d like, I can now generate the **matching pybind11 module** so you can:
 
 ```python
-import numpy as np
-import pyfaust
-
-code = """
-import("stdfaust.lib");
-process = fi.lowpass(3, 800) : *(0.8);
-"""
-
-dsp = pyfaust.FaustMonoDSP(code, 48000)
-x = np.ones(64, dtype=np.float32) * 0.1
-y = np.zeros_like(x)
-dsp.process(x, y)
-print(y[:5])
+dsp = pyfaust.FaustMonoDSP(code)
+print(dsp.get_params())
+dsp.set_param("/Gain", 0.9)
 ```
 
-Boom 💥 — now you’re processing audio through Faust *from Python*.
-
----
-
-## 🧠 Option 2 — SWIG (old-school, more verbose)
-
-If you need compatibility with older toolchains or languages other than Python, SWIG can wrap it too — but it’s heavier and less Pythonic.
-
-You’d create a `.i` interface file that `%include "FaustDSP.hpp"`, then build with:
-
-```bash
-swig -c++ -python faust_bind.i
-```
-
-But for modern work (especially if you’re mixing NumPy or real-time DSP prototyping), **Pybind11 is far superior**.
-
----
-
-## ✅ Summary
-
-| Method       | Best for       | Pros                       | Cons                      |
-| ------------ | -------------- | -------------------------- | ------------------------- |
-| **Pybind11** | Python 3       | Clean, modern, NumPy-ready | C++17 required            |
-| **SWIG**     | Multi-language | Wider reach                | Clunky Python integration |
-
----
-
-If you tell me your **goal for the Python side** (e.g. prototyping synths, live audio streaming, ML-based modulation, etc.), I can generate a tailored binding layout — including buffer-size flexibility and real-time performance hints.
-
-Would you like me to make that next?
+Would you like me to produce that next (with a full CMakeLists.txt so it builds cleanly)?
